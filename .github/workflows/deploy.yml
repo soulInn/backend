@@ -8,7 +8,8 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Login to DockerHub
         uses: docker/login-action@v3
@@ -16,24 +17,26 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and Push Docker Image
-        run: |
-          # 브랜치별로 다른 태그 생성 (main -> latest, dev -> dev)
-          TAG=${{ github.ref_name == 'main' && 'latest' || 'dev' }}
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:$TAG .
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:$TAG
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # 서버 아키텍처(ARM64)에 맞춰 빌드
+          platforms: linux/arm64
+          # 브랜치별 태그: main -> latest, develop -> dev
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:${{ github.ref_name == 'main' && 'latest' || 'dev' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
-    env:
-      CONFIG_DIR: "/home/ubuntu/docker/backend/config-${{ github.ref_name == 'main' && 'prod' || 'dev' }}"
-      BASE_DIR: "/home/ubuntu/docker/backend/"
-      DB_PASSWORD: ${{ github.ref_name == 'main' && secrets.PROD_DB_PASSWORD || secrets.DEV_DB_PASSWORD }}
-      DB_NAME: ${{ github.ref_name == 'main' && secrets.PROD_DB_NAME || secrets.DEV_DB_NAME }}
-      DOCKER_COMPOSE_FILE: ${{ github.ref_name == 'main' && 'docker-compose.app.prod.yml' || 'docker-compose.app.dev.yml' }}
     steps:
-      - name: SSH to EC2 and Deploy
+      - name: SSH to Server and Deploy
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
@@ -41,23 +44,30 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           script: |
+            # 1. 환경 변수 설정
+            TAG=${{ github.ref_name == 'main' && 'latest' || 'dev' }}
+            ENV_TYPE=${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+            CONFIG_DIR="/home/ubuntu/docker/backend/config-$ENV_TYPE"
+            BASE_DIR="/home/ubuntu/docker/backend"
+            DOCKER_COMPOSE_FILE="docker-compose.app.$ENV_TYPE.yml"
+
+            mkdir -p $CONFIG_DIR
+
+            # 2. .env 파일 생성 (서버 환경에 직접 쓰기)
+            cat <<EOF > $CONFIG_DIR/.env
+            DB_NAME=${{ github.ref_name == 'main' && secrets.PROD_DB_NAME || secrets.DEV_DB_NAME }}
+            DB_PASSWORD=${{ github.ref_name == 'main' && secrets.PROD_DB_PASSWORD || secrets.DEV_DB_PASSWORD }}
+            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+            NAVER_CLIENT_ID=${{ secrets.NAVER_CLIENT_ID }}
+            NAVER_CLIENT_SECRET=${{ secrets.NAVER_CLIENT_SECRET }}
+            JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+            TAG=$TAG
+            EOF
+
+            # 3. 배포 스크립트 실행
+            cd $BASE_DIR
+            # 기존 latest를 previous로 백업 (롤백용)
+            docker tag ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:$TAG ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:previous || true
             
-            mkdir -p ${{ env.CONFIG_DIR }}
-
-            export TAG=${{ github.ref_name == 'main' && 'latest' || 'dev' }}
-            export HOST_PORT=${{ github.ref_name == 'main' && '8080' || '8081' }}
-            export DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-
-            {
-              echo "DB_NAME=${{ env.DB_NAME }}"
-              echo "DB_PASSWORD=${{ env.DB_PASSWORD }}"
-              echo "DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}"
-              echo "NAVER_CLIENT_ID=${{ secrets.NAVER_CLIENT_ID }}"
-              echo "NAVER_CLIENT_SECRET=${{ secrets.NAVER_CLIENT_SECRET }}"
-              echo "JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}"
-              echo "TAG=${{ github.ref_name == 'main' && 'latest' || 'dev' }}"
-            } > ${{ env.CONFIG_DIR }}/.env
-
-            cd ${{ env.BASE_DIR }}
-            bash deploy.sh ${{ env.DOCKER_COMPOSE_FILE }} ${{ env.CONFIG_DIR }}/.env
-            
+            # 배포 스크립트 호출 (파일명과 env 경로 전달)
+            bash deploy.sh $DOCKER_COMPOSE_FILE $CONFIG_DIR/.env
