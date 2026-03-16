@@ -77,6 +77,7 @@ jobs:
             NAVER_CLIENT_SECRET=${{ secrets.NAVER_CLIENT_SECRET }}
             JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
             TAG=$TAG
+            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
             EOF
 
             cd $BASE_DIR
