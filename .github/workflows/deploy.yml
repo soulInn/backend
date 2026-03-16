@@ -11,23 +11,38 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 1. Java 설정 및 Gradle 캐싱 (빌드 속도 핵심)
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      # 2. 호스트(x86) 환경에서 빠르게 JAR 빌드
+      - name: Build with Gradle
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean build -x test
+
+      # 3. DockerHub 로그인
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # 4. Docker Buildx 설정 (ARM 빌드용)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 5. 빌드된 JAR를 ARM 이미지로 패키징 및 푸시
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          # 서버 아키텍처(ARM64)에 맞춰 빌드
           platforms: linux/arm64
-          # 브랜치별 태그: main -> latest, develop -> dev
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:${{ github.ref_name == 'main' && 'latest' || 'dev' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -44,7 +59,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           script: |
-            # 1. 환경 변수 설정
+            # 환경 변수 및 경로 설정
             TAG=${{ github.ref_name == 'main' && 'latest' || 'dev' }}
             ENV_TYPE=${{ github.ref_name == 'main' && 'prod' || 'dev' }}
             CONFIG_DIR="/home/ubuntu/docker/backend/config-$ENV_TYPE"
@@ -53,7 +68,7 @@ jobs:
 
             mkdir -p $CONFIG_DIR
 
-            # 2. .env 파일 생성 (서버 환경에 직접 쓰기)
+            # .env 파일 생성
             cat <<EOF > $CONFIG_DIR/.env
             DB_NAME=${{ github.ref_name == 'main' && secrets.PROD_DB_NAME || secrets.DEV_DB_NAME }}
             DB_PASSWORD=${{ github.ref_name == 'main' && secrets.PROD_DB_PASSWORD || secrets.DEV_DB_PASSWORD }}
@@ -64,10 +79,10 @@ jobs:
             TAG=$TAG
             EOF
 
-            # 3. 배포 스크립트 실행
             cd $BASE_DIR
-            # 기존 latest를 previous로 백업 (롤백용)
+            
+            # 기존 이미지를 롤백용으로 태깅
             docker tag ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:$TAG ${{ secrets.DOCKERHUB_USERNAME }}/sol-backend:previous || true
             
-            # 배포 스크립트 호출 (파일명과 env 경로 전달)
+            # 배포 스크립트 실행
             bash deploy.sh $DOCKER_COMPOSE_FILE $CONFIG_DIR/.env
